@@ -1,110 +1,71 @@
-# User context
+# AGENTS.md — single structured agent context
 
-## Unclear - ask, don't guess
+> Methodology: multi-agent. You are one terminal in a network of peer omp agents
+> (A2A, the fork's base state). Roles live in terminal names and skill groups,
+> not in personas. Heavy knowledge lives in the knowledge base and is looked up
+> on demand — this file stays the minimum that every request must carry.
 
-- If something is unclear (requirement, format, expected behavior, choice
-  of options, priority) - do NOT reason it through silently and pick:
-  ask the user (`ask`) and wait for the answer.
-- Ask BEFORE irreversible/expensive actions (push, MR, editing shared
-  files, deploy), not after.
-- A guess is acceptable only when the user is not reachable - then label
-  it explicitly as an assumption.
+## meta
 
-## Workflow: search before code
+- Revision: 2026-11-06. Structured, machine-readable sections.
+- "Search before code" and "ask, don't guess" hold without exceptions.
+- Home use = token economy: this file is the floor; details live in the KB.
 
-- Before a hard task (new stack/framework, unfamiliar API, dependency
-  versions, an error with no obvious cause) - web search first, then act.
-  Don't guess from memory: versions, flags and limits change.
-- When stuck (2+ failed attempts, contradictory symptoms) - STOP and
-  search: the full error message, the flag/API name, upstream
-  issues/PR/CHANGELOG, official docs.
-- Prefer primary sources: official docs, GitHub issues/PR/CHANGELOG,
-  papers; confirm key facts with a second source. Cite the source.
-- A known URL - read it directly (`read`), don't search.
+## principles
 
-## Agent workflow: scouts, subagent-driven development, gates
+1. **Ambiguity → ask.** Unclear requirement/format/behavior/choice — a question,
+   not a silent guess. Before irreversible actions (push/MR/deploy) — always.
+2. **Search before code.** New stack, versioned APIs, an error without an
+   obvious cause — search first. Stuck after 2+ failed attempts — STOP and
+   search primary sources.
+3. **Secrets** never enter notes, repos, or transcripts; env-only, referenced
+   by name. Scan for leaks before pushing new files.
+4. **Employer/customer identifiers never enter public repos.** Grep the
+   dictionary before every push.
 
-### Planning: resolve from context, ask the rest, then plan
+## agents (multi-agent network)
 
-- Before planning, resolve what the repo, docs and tools can answer
-  yourself - never ask the user for facts a `read`/`grep`/search gives.
-  Then `ask` only what remains: intent, scope, tradeoffs, irreversible
-  steps. Projects / big tasks: at least one question round before the
-  plan; small unambiguous changes: no questions.
-- Question format: one subject per question; if there is a reason
-  (tradeoff/constraint), state it briefly before the question. Questions
-  are iterative: ask a block → get answers → ask the next block if new
-  ambiguities surfaced. Never dump 20 questions at once.
-- Cover (as applicable): goal and definition of done; scope boundaries
-  (what we do NOT do); interfaces/formats touched; error/edge-case
-  behavior; dependencies and versions; irreversible actions (push, MR,
-  migrations); approach preferences when several exist.
-- Final statement: after the question rounds, fix a short final task
-  statement (goal, boundaries, definition of done, key decisions) -
-  confirm it with the user in one message, and only then run
-  `skill://writing-plans` against it. On conflict, the user's words win.
-- Following the plan: a plan is a commitment; deviation (out-of-plan work,
-  scope change) - ask the user first, never silently. Track plan progress
-  in `todo`; after each plan task verify its definition of done, not just
-  "next on the list".
+- Every omp terminal runs an A2A bridge on a free port (fork default) with
+  auto-registration of peers. The roster: `read agent://`, `/a2a list`.
+- **A terminal's role is its name**: `omp --a2a-name builder|reviewer|...` —
+  peers see `a2a:<name>` and address tasks by meaning.
+- A task for a peer terminal goes to **its main agent** (it decides itself
+  whether to answer or spawn subagents); explicit spawning is `a2aSpawn: true`.
+- Subagents: one spawn = one clean context; concurrency/budget limits apply
+  automatically (ingress guard, refuse policy).
 
-### Big task → parallel scout swarm
+## skills (groups; one catalog, the task picks the group)
 
-- Big task signals: 3+ independent search directions, an unfamiliar
-  repo/stack, or 5+ files touched. Before planning - parallel exploration
-  with `scout` agents (one `task` call, one scout per direction), not
-  sequential file reading by yourself. Compress scout results into
-  contracts for the plan.
-- One read-only scout alongside ongoing work is fine; don't fan out
-  scouts for volume's sake.
+| Group | Skills | When |
+|---|---|---|
+| **dev engineering** | eng-gates; the superpowers cycle (brainstorming, writing-plans, subagent-driven-development, test-driven-development, executing-plans, finishing-a-development-branch, receiving/requesting-code-review, verification-before-completion, systematic-debugging) | code: a project of 3+ tasks → the SDD cycle; a small change — edit+test+commit |
+| **knowledge base** | kb-search, kb-curate | any question about past context: search first, then read |
+| **orchestration** | parallel scouts in one task call | 3+ independent research directions |
 
-### Subagent-driven development - the default path for projects
+Skill descriptions are cheap (read on `skill://`); what costs is running the
+wrong group for the task. The task's context decides.
 
-- Plugin `@loneexile/omp-superpowers`: skills `brainstorming →
-  writing-plans → subagent-driven-development → finishing-a-development-branch`
-  and the five SDD agents (`sdd-implementer`, `sdd-reviewer`,
-  `sdd-rereviewer`, `sdd-escalation-implementer`, `sdd-final-reviewer`)
-  in the `task` roster. Map seat models to YOUR providers via
-  `task.agentModelOverrides` in config.yml - the shipped Anthropic pins
-  apply only where you have those credentials.
-- Project (3+ coupled tasks, new behavior with design choices) - the
-  superpowers path: `skill://brainstorming` → `skill://writing-plans` →
-  `skill://subagent-driven-development`. ALWAYS dispatch SDD seats by
-  their `sdd-*` agent types, never the bundled `task`/`reviewer`.
-- Small change (one clear action; no new interface, no migration, no
-  security surface) - no SDD: fix, test, one commit.
+## tools (explicit grants above principles)
 
-### After a solved task - quality review with eng-gates
+- `gate.py approve` — without `ENG_GATES_AGENT=1` (it refuses with it). After a
+  sanctioned change to protected configs.
+- `install-tools.sh --python --ub` — global tools; idempotent.
+- Everything else (init in a repo, thresholds, push/MR) — consent first.
 
-- After each solved task in a code repo (before "done", before review,
-  before push): `skill://eng-gates` → `gate fast` per work unit, `gate
-  full` before "done". Install: copy `skills/eng-gates/` of this persona
-  repo into `~/.omp/agent/skills/eng-gates` (`<skill>` below).
-- Run gate.py with Python ≥3.11 (tomllib): `uv` python recommended;
-  a system 3.9 will fail with `No module named 'tomllib'`. Windows:
-  `python3` is the Microsoft Store stub - use `python` / `uv run python`.
-- Uninitialized repo: `python3 <skill>/scripts/gate.py fast -C <repo>`;
-  `init` in a repo - only with the user's consent (it writes files into
-  the repo). Report: the final summary line of `gate full` + every WARN
-  `guard.suppress` entry. Never lower thresholds to go green; scope, not
-  the gate, is what you adjust.
-- In a repo without code (pure yaml/config) eng-gates does not apply -
-  then the review is done by `reviewer`/`security-reviewer`.
-- Which tool per language and stage (fast / full / targeted / never a
-  gate): `skill://eng-gates/references/gates.md` → "Stage matrix". Read it
-  when choosing checks; don't stack linters, profilers are never gates.
+## workflow
 
-## Token discipline (paid / metered models)
+- **Project** (new feature / 3+ tasks): brainstorming → questions →
+  writing-plans → subagent-driven-development (sdd agents) → eng-gates
+  (`gate fast` per unit, `gate full` before done).
+- **Small change**: edit → test → commit. No SDD.
+- **Research**: 3+ independent directions → parallel scouts in one call.
+- **After code**: `skill://eng-gates` → `gate fast`; `gate full` before done.
 
-- Turn count beats token price: cheap models often take 2–3× turns on
-  multi-step work and cost MORE overall. Keep a mid-tier model as the
-  floor for reviewers and prose-implementers; cheap tiers only for
-  transcription-like tasks (the plan text contains the full code).
-- Dispatch briefs: one task, its interfaces, global constraints - nothing
-  else. Never paste session history into briefs.
-- Read long subagent results from the report file / `agent://<id>`, not by
-  echoing them back into the controller context.
-- Batch small same-shape edits into ONE dispatch; review the batch as one
-  diff.
-- Prefer fresh subagents per task over context accumulation in the main
-  session; that is what keeps the controller small.
+## escalation
+
+Stop and ask on: push/MR to shared repos, deploy, editing shared files,
+destructive scope beyond one unit, missing context after a KB search.
+
+## repo-local
+
+An `AGENTS.md` in a repo overrides this file.
