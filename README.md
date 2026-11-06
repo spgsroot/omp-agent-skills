@@ -1,19 +1,28 @@
-# omp-agent-persona - Developer-персона для Oh My Pi (omp)
+# omp-agent-persona — developer-персона для Oh My Pi (omp)
 
-Developer-персона: SDD-workflow (superpowers) + детерминированные
-quality-гейты (eng-gates). Для домашнего
-использования с любыми доступными провайдерами моделей.
+**Парадигма: минимальный надёжный контекст.** Персона — это не конвейер,
+который гоняет каждый запрос через SDD-цикл и все гейты, а минимум
+структуры, который вмешивается, когда задача реально этого требует.
+По умолчанию агент делает работу напрямую (правка → тест → коммит);
+SDD-цикл, quality-гейты и субагенты подключаются по размеру задачи,
+а не «на всякий случай». Уход от оверинженеринга — принцип №0 в
+`AGENTS.md`: процесс-шаг заслуживает место только исправлением сбоя,
+который случился на самом деле.
 
-## Из чего состоит пайплайн
+Состав: eng-gates (детерминированные quality-гейты), навыки
+reversing / writing-docs / coordinating, референс-агенты omp.
+Для домашнего использования с любыми доступными провайдерами моделей.
 
-Полный цикл разработки:
+## Когда какая тяжёлая артиллерия включается
+
+Дефолт — прямой путь. Всё остальное — эскалация по размеру задачи:
 
 ```mermaid
 flowchart TD
-    R["запрос"] --> B["brainstorming: вопросы → дизайн"]
-    B -->|малое изменение| Q["правка → тест → один коммит (без SDD)"]
-    B -->|проект| P["writing-plans: план + волны задач"]
-    P --> S["subagent-driven-development: волны sdd-агентов"]
+    R["запрос"] --> D{"размер?"}
+    D -->|"правка одного юнита"| Q["правка → тест → коммит"]
+    D -->|"3+ задач / несколько владельцев"| B["brainstorming → writing-plans"]
+    B --> S["subagent-driven-development: волны sdd-агентов"]
     S --> T["gate fast после каждого юнита"]
     T --> G["gate full перед done"]
     G --> F["sdd-final-reviewer: ревью всей ветки"]
@@ -72,20 +81,27 @@ flowchart TD
 
 ## Состав репозитория
 
-- `persona-dev.yml` - конфиг-оверлей (`omp --config persona-dev.yml`):
-- `persona-dev-prompt.md` - приложение к системному промпту.
+- `persona-dev.yml` — конфиг-оверлей (`omp --config persona-dev.yml`).
+- `persona-dev-prompt.md` — приложение к системному промпту
   (`--append-system-prompt`): явные разрешения на `gate.py approve` и
   `install-tools.sh --python --ub`.
-- `AGENTS.md` - контекст-файл: workflow-правила (скаут-разведка,
-  SDD-путь, eng-gates после юнита, ask-don't-guess, search-before-code,
-  token-дисциплина). Матрица инструментов по этапам вынесена в
+- `AGENTS.md` — контекст-файл: принципы (включая №0 — простота важнее
+  процесса), правила эскалации workflow по размеру задачи, многоагентная
+  сеть (A2A), группы скиллов. Матрица инструментов вынесена в
   `skills/eng-gates/references/gates.md` и грузится по требованию.
-- `skills/eng-gates/` - скилл гейтов целиком: `gate.py`, `install-tools.sh`,
+- `skills/eng-gates/` — скилл гейтов целиком: `gate.py`, `install-tools.sh`,
   шаблоны конфигов (rust/python/ts/common), CI-шаблон.
-- `agents/` - референс-копии бандлованных агентов omp (scout, reviewer,
+- `skills/reversing/` — реверс-инжиниринг артефактов без исходников:
+  bunfs/Mach-O/ELF, минифицированные бандлы, бинарные форматы, протоколы.
+  Метод: гипотеза → проверка скриптом → сверка с upstream-кодом формата.
+- `skills/writing-docs/` — правила готовой документации с первого черновика:
+  русский без калек, факты с источниками, таблицы для значений.
+- `skills/coordinating/` — координация мультиагентной работы: разложение на
+  параллельные юниты без общей записи, волны, статус-таблицы, эскалация.
+- `agents/` — референс-копии бандлованных агентов omp (scout, reviewer,
   security-reviewer, sonic, task) для кастомизации.
-- `scripts/omp-dev.sh` - лаунчер: `--config … --append-system-prompt …`.
-- `docs/token-costs.md` - анализ токен-затрат для моделей.
+- `scripts/omp-dev.sh` — лаунчер: `--config … --append-system-prompt …`.
+- `docs/token-costs.md` — анализ токен-затрат для моделей.
 
 ## Установка (любая машина)
 
@@ -120,7 +136,7 @@ bash skills/eng-gates/scripts/install-tools.sh --python --ub
 ```bash
 cp AGENTS.md ~/.omp/agent/AGENTS.md
 cp persona-dev-prompt.md ~/.omp/agent/APPEND_SYSTEM.md
-cp -r skills/eng-gates ~/.omp/agent/skills/
+cp -r skills/eng-gates skills/reversing skills/writing-docs skills/coordinating ~/.omp/agent/skills/
 ```
 
 ### Windows

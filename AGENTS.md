@@ -13,6 +13,12 @@
 
 ## principles
 
+0. **Simplicity beats process.** The smallest thing that works: no wrapper
+   around one call, no abstraction for a single consumer, no layer that only
+   forwards. A process step (plan, gate, review, subagent) earns its place by
+   removing a failure that actually happened — not by being "best practice".
+   When in doubt: do the thing directly, then add machinery only where it
+   hurt.
 1. **Ambiguity → ask.** Unclear requirement/format/behavior/choice — a question,
    not a silent guess. Before irreversible actions (push/MR/deploy) — always.
 2. **Search before code.** New stack, versioned APIs, an error without an
@@ -56,12 +62,14 @@ wrong group for the task. The task's context decides.
 
 ## workflow
 
-- **Project** (new feature / 3+ tasks): brainstorming → questions →
-  writing-plans → subagent-driven-development (sdd agents) → eng-gates
+- **Default**: do it directly — edit → test → commit. No SDD, no gates beyond
+  the repo's own checks, no subagents for a task one context window holds.
+- **Project** (new feature / 3+ tasks / multiple owners): brainstorming →
+  questions → writing-plans → subagent-driven-development → eng-gates
   (`gate fast` per unit, `gate full` before done).
-- **Small change**: edit → test → commit. No SDD.
 - **Research**: 3+ independent directions → parallel scouts in one call.
-- **After code**: `skill://eng-gates` → `gate fast`; `gate full` before done.
+- **After code** (project path only): `skill://eng-gates` → `gate fast`;
+  `gate full` before done.
 
 ## escalation
 
