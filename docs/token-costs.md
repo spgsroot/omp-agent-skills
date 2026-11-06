@@ -24,10 +24,12 @@ Delta breakdown (o200k estimates; Anthropic's tokenizer counts ~1.3× more):
 | SDD agent descriptions in the `task` tool | 0.25k | five `sdd-*` seats |
 | lsp / ast_grep enablement | small | `task.enableLsp`, `astGrep.enabled` |
 
-The bootstrap is plugin-owned; disabling the extension kills the SDD
-skill-discovery guidance too - not recommended for the dev persona.
-Skill descriptions: add names to `skills.ignoredSkills` for skills you never
-read (count `skill://<name>` reads in `~/.omp/agent/sessions` first).
+Исторически bootstrap использовался как обязательный слой персоны.
+В текущей интеграции он отключён через
+`disabledExtensions: [extension-module:superpowers]`: на omp 18.15.0 это
+сохраняет обнаружение скиллов и SDD-агентов. `using-superpowers` исключается
+через `skills.ignoredSkills`, чтобы его стартовый триггер не вернул bootstrap.
+Остальные измерения в этом документе исторические, а не замер новой схемы.
 
 ## Per-dispatch costs (the real driver)
 

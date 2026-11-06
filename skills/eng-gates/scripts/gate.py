@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
+SCRIPT_DIR = Path(__file__).resolve().parent
+SKILL_DIR = SCRIPT_DIR.parent if SCRIPT_DIR.name == "scripts" else SCRIPT_DIR
 CONFIG_NAME = "gates.toml"
 STATE_DIR = ".gates"
 VENDOR_DIR = "tools/eng-gates"
@@ -153,20 +155,171 @@ def builtin_checks() -> list[Check]:
 
 # ---------------------------------------------------------------- helpers
 
-def sh(argv: list[str] | str, cwd: Path, timeout: int | None = None, shell: bool = False):
+class _WindowsJob:
+    """Own a check's process tree, including children whose parent exits first."""
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes as w
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
+                ("flags", w.DWORD), ("min_working_set", ctypes.c_size_t),
+                ("max_working_set", ctypes.c_size_t), ("active_processes", w.DWORD),
+                ("affinity", ctypes.c_size_t), ("priority", w.DWORD), ("scheduling", w.DWORD),
+            ]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("basic", BasicLimits), ("io", ctypes.c_ulonglong * 6),
+                ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t),
+            ]
+
+        self.api = ctypes.WinDLL("kernel32", use_last_error=True)
+        signatures = {
+            "CreateJobObjectW": (w.HANDLE, [w.LPVOID, w.LPCWSTR]),
+            "SetInformationJobObject": (w.BOOL, [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD]),
+            "AssignProcessToJobObject": (w.BOOL, [w.HANDLE, w.HANDLE]),
+            "CloseHandle": (w.BOOL, [w.HANDLE]),
+            "CreateToolhelp32Snapshot": (w.HANDLE, [w.DWORD, w.DWORD]),
+            "Thread32First": (w.BOOL, [w.HANDLE, w.LPVOID]),
+            "Thread32Next": (w.BOOL, [w.HANDLE, w.LPVOID]),
+            "OpenThread": (w.HANDLE, [w.DWORD, w.BOOL, w.DWORD]),
+            "ResumeThread": (w.DWORD, [w.HANDLE]),
+        }
+        for name, (result, arguments) in signatures.items():
+            function = getattr(self.api, name)
+            function.restype = result
+            function.argtypes = arguments
+        self.handle = self.api.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        limits = ExtendedLimits()
+        limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self.api.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            error = ctypes.WinError(ctypes.get_last_error())
+            self.close()
+            raise error
+
+    def attach_and_resume(self, process):
+        import ctypes
+        from ctypes import wintypes as w
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [
+                ("size", w.DWORD), ("usage", w.DWORD), ("thread_id", w.DWORD),
+                ("process_id", w.DWORD), ("base_priority", w.LONG),
+                ("delta_priority", w.LONG), ("flags", w.DWORD),
+            ]
+
+        if not self.api.AssignProcessToJobObject(self.handle, int(process._handle)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        # Popen closes the primary thread handle. Locate it while still suspended:
+        # no user code can run or create a child before the job owns the process.
+        snapshot = self.api.CreateToolhelp32Snapshot(4, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            entry = ThreadEntry()
+            entry.size = ctypes.sizeof(entry)
+            found = self.api.Thread32First(snapshot, ctypes.byref(entry))
+            while found:
+                if entry.process_id == process.pid:
+                    thread = self.api.OpenThread(2, False, entry.thread_id)  # THREAD_SUSPEND_RESUME
+                    if not thread:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    try:
+                        if self.api.ResumeThread(thread) == 0xFFFFFFFF:
+                            raise ctypes.WinError(ctypes.get_last_error())
+                    finally:
+                        self.api.CloseHandle(thread)
+                    return
+                found = self.api.Thread32Next(snapshot, ctypes.byref(entry))
+            raise OSError("cannot locate the suspended tool's primary thread")
+        finally:
+            self.api.CloseHandle(snapshot)
+
+    def close(self):
+        if self.handle:
+            self.api.CloseHandle(self.handle)
+            self.handle = None
+
+def sh(argv: list[str], cwd: Path, timeout: int | None = None):
+    p = None
+    job = None
     try:
-        p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, shell=shell,
-                           errors="replace")
-        return p.returncode, (p.stdout or "") + (p.stderr or "")
-    except subprocess.TimeoutExpired as e:
-        out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        return 124, out + f"\n[eng-gates] timed out after {timeout}s"
-    except FileNotFoundError as e:
-        return 127, str(e)
+        if os.name == "nt" and Path(argv[0]).suffix.lower() in (".cmd", ".bat"):
+            # npm's batch shim is data, never a shell boundary for source filenames.
+            shim = Path(argv[0])
+            text = shim.read_text(encoding="utf-8")
+            entry = re.search(r'"%dp0%[\\/](\.\.[\\/][^"\r\n]+)"', text)
+            node = shutil.which("node")
+            if not entry or not node:
+                return 127, "cannot safely run batch tool; configure a native executable or an npm Node shim"
+            script = (shim.parent / entry.group(1).replace("\\", "/")).resolve()
+            if not script.is_file():
+                return 127, f"npm entry point not found: {script}"
+            if script.suffix.lower() not in (".js", ".mjs", ".cjs"):
+                with script.open("rb") as source:
+                    shebang = source.readline(256)
+                if not re.match(rb"#![^\r\n]*\bnode(?:\.exe)?(?:\s|$)", shebang):
+                    return 127, f"npm entry point is not a Node script: {script}"
+            argv = [node, str(script), *argv[1:]]
+        job = _WindowsJob() if os.name == "nt" else None
+        p = subprocess.Popen(
+            argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+            start_new_session=os.name != "nt",
+            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | 4) if job else 0,  # CREATE_SUSPENDED
+        )
+        if job:
+            job.attach_and_resume(p)
+        try:
+            out, err = p.communicate(timeout=timeout)
+            return p.returncode, out + err
+        except subprocess.TimeoutExpired as error:
+            if job:
+                job.close()
+            else:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if p.poll() is None:
+                p.kill()
+            try:
+                out, err = p.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                # External launchers can escape a process group/job. Keep cleanup bounded;
+                # Windows reader threads may hold the stream lock until the writer exits.
+                if os.name != "nt":
+                    p.stdout.close()
+                    p.stderr.close()
+                p.wait(timeout=5)
+                out, err = error.output or b"", error.stderr or b""
+            if isinstance(out, bytes):
+                out = out.decode("utf-8", errors="replace")
+            if isinstance(err, bytes):
+                err = err.decode("utf-8", errors="replace")
+            return 124, out + err + f"\n[eng-gates] timed out after {timeout}s"
+    except OSError as error:
+        if p is not None and p.poll() is None:
+            p.kill()
+            p.wait(timeout=5)
+        return 127, str(error)
+    finally:
+        if job:
+            job.close()
 
 
 def git(root: Path, *args: str) -> tuple[int, str]:
-    return sh(["git", *args], root)
+    try:
+        result = subprocess.run(["git", *args], cwd=root, capture_output=True)
+        return result.returncode, os.fsdecode(result.stdout) + os.fsdecode(result.stderr)
+    except OSError as error:
+        return 127, str(error)
 
 
 def find_root(start: Path) -> Path:
@@ -182,7 +335,7 @@ def load_config(root: Path) -> dict:
     if not p.exists():
         return {}
     try:
-        return tomllib.loads(p.read_text())
+        return tomllib.loads(p.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
         print(f"[eng-gates] {CONFIG_NAME}: {e}", file=sys.stderr)
         sys.exit(2)
@@ -206,29 +359,33 @@ def is_git(root: Path) -> bool:
 def resolve_base(root: Path, cfg: dict, override: str | None) -> str | None:
     if not is_git(root):
         return None
-    candidates = [override] if override else [cfg.get("gate", {}).get("base"), "origin/main", "origin/master", "main", "master"]
-    for ref in filter(None, candidates):
+    requested = override or cfg.get("gate", {}).get("base")
+    candidates = [requested] if requested else ["origin/main", "origin/master", "main", "master"]
+    for ref in candidates:
         code, out = git(root, "merge-base", ref, "HEAD")
         if code == 0:
             return out.strip()
-    if git(root, "rev-parse", "--verify", "-q", "HEAD")[0] == 0:
-        return "HEAD"
-    return None  # repository without commits
+        if requested:
+            print(f"[eng-gates] cannot resolve base {ref!r}: {out.strip()}", file=sys.stderr)
+            sys.exit(2)
+    code, head = git(root, "rev-parse", "--verify", "-q", "HEAD")
+    return head.strip() if code == 0 else None  # repository without commits
 
 
 def changed_files(root: Path, base: str | None) -> list[str] | None:
     """Files changed against base, including staged, unstaged and untracked. None = not a git repo."""
     if not is_git(root):
         return None
+    args = ("diff", "--no-renames", "--name-only", "-z", "--diff-filter=ACDMRT", base) if base else (
+        "diff", "--cached", "--name-only", "-z")
     files: set[str] = set()
-    if base:
-        code, out = git(root, "diff", "--name-only", "--diff-filter=ACMRT", base)
-        if code == 0:
-            files.update(line for line in out.splitlines() if line)
-    else:  # no commits yet: everything staged counts
-        files.update(line for line in git(root, "diff", "--cached", "--name-only")[1].splitlines() if line)
-    files.update(line for line in git(root, "ls-files", "--others", "--exclude-standard")[1].splitlines() if line)
-    return sorted(f for f in files if (root / f).exists())
+    for query in (args, ("ls-files", "--others", "--exclude-standard", "-z")):
+        code, out = git(root, *query)
+        if code:
+            print(f"[eng-gates] cannot determine changed files: {out.strip()}", file=sys.stderr)
+            sys.exit(2)
+        files.update(name for name in out.split("\0") if name)
+    return sorted(files)
 
 
 def langs_touched(files: list[str]) -> set[str]:
@@ -236,7 +393,9 @@ def langs_touched(files: list[str]) -> set[str]:
     for f in files:
         name, ext = Path(f).name, Path(f).suffix
         for lang, exts in LANG_EXT.items():
-            if ext in exts or name in LANG_CONFIG_FILES[lang]:
+            if ext in exts or any(fnmatch.fnmatch(name, pattern) for pattern in LANG_CONFIG_FILES[lang]) or (
+                lang == "ts" and fnmatch.fnmatch(name, "tsconfig*.json")
+            ):
                 out.add(lang)
     return out
 
@@ -311,34 +470,34 @@ def file_at_base(root: Path, base: str | None, rel: str) -> str | None:
     return out if code == 0 else None
 
 
-def protected_state(root: Path, cfg: dict) -> dict[str, str]:
-    """Hash of every protected file / section as it is now (used by `approve`)."""
+def protected_state(root: Path, cfg: dict, base: str | None) -> dict[str, str]:
+    """Hash protected content, including explicit tombstones for approved deletions."""
     state = {}
     globs = PROTECTED_FILES + cfg.get("gate", {}).get("protected", [])
-    for g in globs:
-        for p in root.glob(g):
-            if p.is_file() and ".git" not in p.parts:
-                state[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
-    for rel, sections in PROTECTED_TOML_SECTIONS.items():
-        p = root / rel
-        if p.exists():
-            try:
-                data = tomllib.loads(p.read_text())
-            except tomllib.TOMLDecodeError:
-                continue
-            for s in sections:
-                state[f"{rel}#{'.'.join(s)}"] = hashlib.sha256(
-                    json.dumps(table_at(data, s), sort_keys=True, default=str).encode()).hexdigest()
-    for rel, keys in PROTECTED_JSON_KEYS.items():
-        p = root / rel
-        if p.exists():
-            try:
-                data = json.loads(p.read_text())
-            except json.JSONDecodeError:
-                continue
-            for k in keys:
-                state[f"{rel}#{'.'.join(k)}"] = hashlib.sha256(
-                    json.dumps(table_at(data, k), sort_keys=True).encode()).hexdigest()
+    candidates = set(changed_files(root, base) or [])
+    for pattern in globs:
+        pattern = pattern + "/*" if pattern.endswith("/**") else pattern
+        candidates.update(
+            path.relative_to(root).as_posix()
+            for path in root.glob(pattern) if path.is_file() and ".git" not in path.parts
+        )
+    for rel in candidates:
+        if any(fnmatch.fnmatch(rel, pattern) for pattern in globs):
+            path = root / rel
+            state[rel] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "<deleted>"
+    for rel, sections, loads, error in (
+        *[(r, s, tomllib.loads, tomllib.TOMLDecodeError) for r, s in PROTECTED_TOML_SECTIONS.items()],
+        *[(r, k, json.loads, json.JSONDecodeError) for r, k in PROTECTED_JSON_KEYS.items()],
+    ):
+        path = root / rel
+        try:
+            data = loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except error:
+            continue
+        for section in sections:
+            state[f"{rel}#{'.'.join(section)}"] = hashlib.sha256(
+                json.dumps(table_at(data, section), sort_keys=True, default=str).encode()
+            ).hexdigest()
     return state
 
 
@@ -353,7 +512,8 @@ def guard_config(root: Path, cfg: dict, base: str | None, changed: list[str] | N
         if rel not in changed:
             continue
         try:
-            new = loads((root / rel).read_text())
+            current_file = root / rel
+            new = loads(current_file.read_text(encoding="utf-8")) if current_file.exists() else {}
             old_text = file_at_base(root, base, rel)
             old = loads(old_text) if old_text else {}
         except err as e:
@@ -365,7 +525,7 @@ def guard_config(root: Path, cfg: dict, base: str | None, changed: list[str] | N
     listing = "\n  ".join(hits)
     approved = load_approval(root)
     if approved is not None and not os.environ.get("CI"):
-        current = protected_state(root, cfg)
+        current = protected_state(root, cfg, base)
         if all(k in approved and current.get(k) == approved[k] for k in hits):
             return "pass", f"protected config changed, approved by a human (gate.py approve):\n  {listing}"
     return "fail", ("protected gate configuration changed. Agents must not edit these: revert the change, "
@@ -379,33 +539,50 @@ def approval_path(root: Path) -> Path:
 def load_approval(root: Path) -> dict | None:
     p = approval_path(root)
     try:
-        return json.loads(p.read_text()) if p.exists() else None
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
     except json.JSONDecodeError:
         return None
 
 
 def added_lines(root: Path, base: str | None, changed: list[str]) -> list[tuple[str, int, str]]:
     out: list[tuple[str, int, str]] = []
-    tracked_diff = git(root, "diff", "-U0", "--no-color", base)[1] if base else ""
-    cur_file, line_no = None, 0
-    for line in tracked_diff.splitlines():
-        if line.startswith("+++ "):
-            cur_file = line[6:] if line.startswith("+++ b/") else None
-        elif line.startswith("@@"):
-            m = re.search(r"\+(\d+)", line)
-            line_no = int(m.group(1)) if m else 0
-        elif line.startswith("+") and cur_file:
-            out.append((cur_file, line_no, line[1:]))
-            line_no += 1
-    untracked = set(git(root, "ls-files", "--others", "--exclude-standard")[1].splitlines())
-    if not base:
-        untracked |= set(git(root, "diff", "--cached", "--name-only")[1].splitlines())
-    for rel in sorted(untracked & set(changed)):
-        try:
-            for i, text in enumerate((root / rel).read_text(errors="replace").splitlines(), 1):
-                out.append((rel, i, text))
-        except (OSError, IsADirectoryError):
-            pass
+    code, names = git(root, "ls-files", "--others", "--exclude-standard", "-z")
+    if code:
+        print(f"[eng-gates] cannot list untracked files: {names}", file=sys.stderr)
+        sys.exit(2)
+    untracked = set(names.split("\0"))
+    renamed = {}
+    if base:
+        code, names = git(root, "diff", "--no-ext-diff", "--no-textconv", "--find-renames",
+                          "--name-status", "-z", "--diff-filter=R", base)
+        if code:
+            print(f"[eng-gates] cannot determine renamed files: {names}", file=sys.stderr)
+            sys.exit(2)
+        records = names.split("\0")
+        renamed = {records[i + 2]: records[i + 1] for i in range(0, len(records) - 1, 3)}
+    for rel in changed:
+        if rel in untracked or not base:
+            path = root / rel
+            if path.is_file():
+                out.extend((rel, n, text) for n, text in enumerate(
+                    path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+                ))
+            continue
+        # Associate hunks with the known raw filename, not Git's quoted display path.
+        paths = [renamed[rel], rel] if rel in renamed else [rel]
+        code, diff = git(root, "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv",
+                         "--find-renames", "-U0", "--no-color", base, "--", *paths)
+        if code:
+            print(f"[eng-gates] cannot inspect diff for {rel}: {diff}", file=sys.stderr)
+            sys.exit(2)
+        line_no = None
+        for line in diff.splitlines():
+            if line.startswith("@@"):
+                match = re.search(r"\+(\d+)", line)
+                line_no = int(match.group(1)) if match else None
+            elif line.startswith("+") and line_no is not None:
+                out.append((rel, line_no, line[1:]))
+                line_no += 1
     return out
 
 
@@ -477,8 +654,13 @@ def plan(root: Path, cfg: dict, tier: str, all_files: bool, base_override: str |
     touched = langs_touched(changed) if scope_changed else set(langs)
     files = {}
     for lang in LANG_EXT:
-        if scope_changed:
-            files[lang] = [f for f in changed if Path(f).suffix in LANG_EXT[lang]]
+        config_changed = scope_changed and any(
+            any(fnmatch.fnmatch(Path(f).name, pattern) for pattern in LANG_CONFIG_FILES[lang]) or
+            (lang == "ts" and fnmatch.fnmatch(Path(f).name, "tsconfig*.json"))
+            for f in changed
+        )
+        if scope_changed and not config_changed:
+            files[lang] = [f for f in changed if Path(f).suffix in LANG_EXT[lang] and (root / f).is_file()]
         else:
             files[lang] = None  # whole tree
     ub = cfg.get("ub", {})
@@ -534,6 +716,8 @@ def run_check(root: Path, cfg: dict, c: Check, p: dict, strict: bool, timeout: i
         res["detail"] = "no matching changed files"
         return res
     if argv and argv[0] == tool:
+        argv[0] = path
+    elif tool.startswith("cargo-") and argv[:2] == ["cargo", tool.removeprefix("cargo-")]:
         argv[0] = path
     res["cmd"] = " ".join(argv)
     t0 = time.monotonic()
@@ -660,20 +844,33 @@ def cmd_init(root: Path, force: bool) -> int:
                 kept.append(dst_name)
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
-            text = src.read_text().replace("{{package}}", pkg)
-            dst.write_text(text)
+            text = src.read_text(encoding="utf-8").replace("{{package}}", pkg)
+            dst.write_text(text, encoding="utf-8")
             created.append(dst_name)
     vend = root / VENDOR_DIR
     vend.mkdir(parents=True, exist_ok=True)
     for name in ("gate.py", "bench_compare.py", "install-tools.sh"):
-        shutil.copy2(SKILL_DIR / "scripts" / name, vend / name)
-    created.append(f"{VENDOR_DIR}/ (runner vendored so CI can run it)")
+        src, dst = SCRIPT_DIR / name, vend / name
+        if src.resolve() == dst.resolve() or (dst.exists() and not force):
+            kept.append(f"{VENDOR_DIR}/{name}")
+            continue
+        shutil.copy2(src, dst)
+        created.append(f"{VENDOR_DIR}/{name}")
+    # Keep the original templates with the vendored runner for re-init/new languages.
+    for src in tdir.rglob("*"):
+        if not src.is_file():
+            continue
+        dst = vend / "templates" / src.relative_to(tdir)
+        if src.resolve() == dst.resolve() or (dst.exists() and not force):
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
     gi = root / ".gitignore"
-    lines = gi.read_text().splitlines() if gi.exists() else []
+    lines = gi.read_text(encoding="utf-8").splitlines() if gi.exists() else []
     for entry in (f"{STATE_DIR}/last.json", f"{STATE_DIR}/approved.json", ".metrics/"):
         if entry not in lines:
             lines.append(entry)
-    gi.write_text("\n".join(lines) + "\n")
+    gi.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("created:\n  " + "\n  ".join(created))
     if kept:
         print("kept existing (compare with templates by hand):\n  " + "\n  ".join(kept))
@@ -690,14 +887,15 @@ def cmd_init(root: Path, force: bool) -> int:
     return 0
 
 
-def cmd_approve(root: Path) -> int:
+def cmd_approve(root: Path, base_override: str | None) -> int:
     if os.environ.get("ENG_GATES_AGENT"):
         print("[eng-gates] approve is for humans; refusing inside an agent session (ENG_GATES_AGENT is set)", file=sys.stderr)
         return 2
     cfg = load_config(root)
+    base = resolve_base(root, cfg, base_override)
     p = approval_path(root)
     p.parent.mkdir(exist_ok=True)
-    p.write_text(json.dumps(protected_state(root, cfg), indent=2, sort_keys=True))
+    p.write_text(json.dumps(protected_state(root, cfg, base), indent=2, sort_keys=True), encoding="utf-8")
     print(f"approved current protected config -> {p.relative_to(root)} (ignored when CI is set)")
     return 0
 
@@ -719,7 +917,7 @@ def main() -> int:
     if args.command == "init":
         return cmd_init(root, args.force)
     if args.command == "approve":
-        return cmd_approve(root)
+        return cmd_approve(root, args.base)
     args.tier = args.command
     return cmd_run(root, args)
 
