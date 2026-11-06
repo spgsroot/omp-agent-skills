@@ -1,81 +1,33 @@
-# AGENTS.md — single structured agent context
+# AGENTS.md — omp-agent-skills
 
-> Methodology: multi-agent. You are one terminal in a network of peer omp agents
-> (A2A, the fork's base state). Roles live in terminal names and skill groups,
-> not in personas. Heavy knowledge lives in the knowledge base and is looked up
-> on demand — this file stays the minimum that every request must carry.
+Коллекция скиллов для omp (https://github.com/can1357/oh-my-pi). Персоны
+нет: агент собирает поведение из скиллов сам — по их `description` и карте
+сигналов ([signals.md](./signals.md)), которую пользователь держит в
+своём глобальном контексте.
 
-## meta
+## Как этим пользоваться
 
-- Revision: 2026-11-06. Structured, machine-readable sections.
-- "Search before code" and "ask, don't guess" hold without exceptions.
-- Home use = token economy: this file is the floor; details live in the KB.
+- **Пользователь** задаёт строгость словами («тщательно», «gate full»,
+  «оверинжинь») — карта уровней в [signals.md](./signals.md).
+- **Агент** берёт скилл, когда его триггер совпал с задачей и уровнем;
+  скилл без сигнала не включается.
+- **Разработчик репо**: скилл = каталог с `SKILL.md` (frontmatter
+  `name`/`description` — триггер); никакого кода вне скилла, кроме
+  вспомогательных скриптов самого скилла.
 
-## principles
+## Состав
 
-0. **Simplicity beats process.** The smallest thing that works: no wrapper
-   around one call, no abstraction for a single consumer, no layer that only
-   forwards. A process step (plan, gate, review, subagent) earns its place by
-   removing a failure that actually happened — not by being "best practice".
-   When in doubt: do the thing directly, then add machinery only where it
-   hurt.
-1. **Ambiguity → ask.** Unclear requirement/format/behavior/choice — a question,
-   not a silent guess. Before irreversible actions (push/MR/deploy) — always.
-2. **Search before code.** New stack, versioned APIs, an error without an
-   obvious cause — search first. Stuck after 2+ failed attempts — STOP and
-   search primary sources.
-3. **Secrets** never enter notes, repos, or transcripts; env-only, referenced
-   by name. Scan for leaks before pushing new files.
-4. **Employer/customer identifiers never enter public repos.** Grep the
-   dictionary before every push.
+| Скилл | Триггер |
+|---|---|
+| `eng-gates` | пользователь запросил полные проверки (`full`/`max`), в репо уже есть гейты, или упал существующий гейт |
+| `reversing` | артефакт без исходников: бинарники, бандлы, форматы, протоколы |
+| `writing-docs` | пользовательский текст: README, отчёты, статьи, кб-заметки |
+| `coordinating` | 3+ агента на одной цели: разложение, волны, слияние |
 
-## agents (multi-agent network)
+## Инварианты репо
 
-- Every omp terminal runs an A2A bridge on a free port (fork default) with
-  auto-registration of peers. The roster: `read agent://`, `/a2a list`.
-- **A terminal's role is its name**: `omp --a2a-name builder|reviewer|...` —
-  peers see `a2a:<name>` and address tasks by meaning.
-- A task for a peer terminal goes to **its main agent** (it decides itself
-  whether to answer or spawn subagents); explicit spawning is `a2aSpawn: true`.
-- Subagents: one spawn = one clean context; concurrency/budget limits apply
-  automatically (ingress guard, refuse policy).
-
-## skills (groups; one catalog, the task picks the group)
-
-| Group | Skills | When |
-|---|---|---|
-| **dev engineering** | eng-gates; the superpowers cycle (brainstorming, writing-plans, subagent-driven-development, test-driven-development, executing-plans, finishing-a-development-branch, receiving/requesting-code-review, verification-before-completion, systematic-debugging) | code: a project of 3+ tasks → the SDD cycle; a small change — edit+test+commit |
-| **reversing** | reversing | any artifact without sources: binaries, bundles, formats, protocols |
-| **docs** | writing-docs (READMEs/reports/notes); writing-skills (meta: creating skills) | any user-facing text |
-| **coordinating** | coordinating, dispatching-parallel-agents (role: a `--a2a-name coordinator` terminal or whoever fans out) | 3+ agents on one goal: units, waves, tracking, merge |
-| **knowledge base** | kb-search, kb-curate | any question about past context: search first, then read |
-
-Skill descriptions are cheap (read on `skill://`); what costs is running the
-wrong group for the task. The task's context decides.
-
-## tools (explicit grants above principles)
-
-- `gate.py approve` — without `ENG_GATES_AGENT=1` (it refuses with it). After a
-  sanctioned change to protected configs.
-- `install-tools.sh --python --ub` — global tools; idempotent.
-- Everything else (init in a repo, thresholds, push/MR) — consent first.
-
-## workflow
-
-- **Default**: do it directly — edit → test → commit. No SDD, no gates beyond
-  the repo's own checks, no subagents for a task one context window holds.
-- **Project** (new feature / 3+ tasks / multiple owners): brainstorming →
-  questions → writing-plans → subagent-driven-development → eng-gates
-  (`gate fast` per unit, `gate full` before done).
-- **Research**: 3+ independent directions → parallel scouts in one call.
-- **After code** (project path only): `skill://eng-gates` → `gate fast`;
-  `gate full` before done.
-
-## escalation
-
-Stop and ask on: push/MR to shared repos, deploy, editing shared files,
-destructive scope beyond one unit, missing context after a KB search.
-
-## repo-local
-
-An `AGENTS.md` in a repo overrides this file.
+- Русский текст без транслитных калек; идентификаторы кода — как есть.
+- Машино-пути и упоминания работодателя не коммитятся.
+- Каждый скилл самодостаточен: читается без остального репо.
+- Мета-правило для новых скиллов: если скилл можно заменить одной строкой
+  в AGENTS.md пользователя — это не скилл, а строка. Не плодить.

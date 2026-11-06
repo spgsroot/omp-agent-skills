@@ -1,4 +1,4 @@
-# Token-cost analysis of the dev persona (for metered/home models)
+# Token-cost analysis of the dev persona (historical, 2026-10-31; the persona layer is gone — see README)
 
 Purpose: where the tokens actually go when you pay per token.
 

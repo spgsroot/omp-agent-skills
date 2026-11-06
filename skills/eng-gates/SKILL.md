@@ -1,24 +1,26 @@
 ---
 name: eng-gates
-description: Deterministic quality gates for Rust, Python and JS/TS - format, lint, types, tests, module boundaries, CRAP, duplication, mutation, benchmarks, plus guards against weakening the gates. Use after every unit of code change (gate fast), before calling work done or in review (gate full), when setting gates up in a repo (init, doctor), and whenever a gate fails and you must fix it.
+description: Deterministic quality gates for Rust, Python and JS/TS - format, lint, types, tests, module boundaries, CRAP, duplication, mutation, benchmarks, plus guards against weakening the gates. Use when the user asks for full checks ("все проверки", "gate full", production-grade), when gates already exist in the repo and one fails, or when setting gates up in a repo (init, doctor). NOT an always-on step - the repo's own check command is the default after a code change.
 ---
 
 # eng-gates
 
-Gates decide when code is done. You do not. A task is finished only when `gate full` passes.
+Gates decide when code is done — **when they are on**. When they are, a task
+is finished only when `gate full` passes. Turning them on is the user's call
+(see the strictness signal map), not yours.
 
 Runner: `python3 tools/eng-gates/gate.py` inside a repo that ran `init`, otherwise
 `python3 <this skill>/scripts/gate.py`. Add `-C <dir>` to point at another project.
 Windows: `python3` is the Microsoft Store stub - substitute `python` (or `uv run python`) everywhere below;
 the ub checks (`ub.crap`, `ub.dry`, `ub.mutate`) are unavailable there and report as a missing tool.
 
-## Loop
+## Loop (when the user picked gates for this task)
 
 1. Make one small change (one test, one function, one refactor step).
 2. `gate.py fast` - seconds. Format, lint, types, tests, module boundaries, both guards. Changed files only.
 3. Red: fix the first failure, rerun. Do not start the next unit while fast is red.
 4. Unit done → commit (why, what, how it was proven).
-5. Before saying "done", before review, before push: `gate.py full` - adds dependency audit, unused deps,
+5. Before saying "done" for a gates task, before review, before push: `gate.py full` - adds dependency audit, unused deps,
    CRAP, duplication, mutation, benchmarks, bundle size.
 6. Report: paste the final summary line of `gate full`, and list every `WARN guard.suppress` entry.
 
