@@ -39,8 +39,10 @@
 | Group | Skills | When |
 |---|---|---|
 | **dev engineering** | eng-gates; the superpowers cycle (brainstorming, writing-plans, subagent-driven-development, test-driven-development, executing-plans, finishing-a-development-branch, receiving/requesting-code-review, verification-before-completion, systematic-debugging) | code: a project of 3+ tasks → the SDD cycle; a small change — edit+test+commit |
+| **reversing** | reversing | any artifact without sources: binaries, bundles, formats, protocols |
+| **docs** | writing-docs (READMEs/reports/notes); writing-skills (meta: creating skills) | any user-facing text |
+| **coordinating** | coordinating, dispatching-parallel-agents (role: a `--a2a-name coordinator` terminal or whoever fans out) | 3+ agents on one goal: units, waves, tracking, merge |
 | **knowledge base** | kb-search, kb-curate | any question about past context: search first, then read |
-| **orchestration** | parallel scouts in one task call | 3+ independent research directions |
 
 Skill descriptions are cheap (read on `skill://`); what costs is running the
 wrong group for the task. The task's context decides.
