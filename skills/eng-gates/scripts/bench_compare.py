@@ -13,19 +13,28 @@ Exit 0 = within budget, 1 = regression or missing benchmark, 2 = bad input.
 """
 import argparse
 import json
+import math
 import sys
 
 
 def load(path: str) -> dict[str, float]:
     try:
-        data = json.load(open(path))
+        with open(path, encoding="utf-8") as source:
+            data = json.load(source)
     except (OSError, json.JSONDecodeError) as e:
         print(f"bench_compare: cannot read {path}: {e}", file=sys.stderr)
         sys.exit(2)
-    if not isinstance(data, dict) or not all(isinstance(v, (int, float)) for v in data.values()):
-        print(f"bench_compare: {path} must be a JSON object of name -> number", file=sys.stderr)
+    if not isinstance(data, dict) or not all(type(v) in (int, float) for v in data.values()):
+        print(f"bench_compare: {path} must be a JSON object of name -> finite number", file=sys.stderr)
         sys.exit(2)
-    return {k: float(v) for k, v in data.items()}
+    try:
+        values = {k: float(v) for k, v in data.items()}
+    except OverflowError:
+        values = None
+    if values is None or not all(math.isfinite(v) for v in values.values()):
+        print(f"bench_compare: {path} contains a non-finite metric", file=sys.stderr)
+        sys.exit(2)
+    return values
 
 
 def main() -> int:
@@ -36,6 +45,8 @@ def main() -> int:
     ap.add_argument("--higher-is-better", action="store_true")
     ap.add_argument("--allow-missing", action="store_true", help="a benchmark absent from the current run is not a failure")
     a = ap.parse_args()
+    if not math.isfinite(a.max_regression) or a.max_regression < 0:
+        ap.error("--max-regression must be a finite non-negative percentage")
     base, cur = load(a.baseline), load(a.current)
     worst, failed = 0.0, False
     rows = []

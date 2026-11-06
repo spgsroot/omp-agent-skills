@@ -1,8 +1,13 @@
 # Gate reference
 
 Each check: what it catches, the command it runs, how to read a failure, the usual real fix.
-Tier `fast` runs on every unit of work; `full` adds the slow ones. Scope is files changed since the merge-base
-with `gate.base` (default `origin/main`), plus staged, unstaged and untracked files. `--all` = whole tree.
+When gates are selected for the task, tier `fast` checks each work unit and `full` adds the slow checks.
+Scope includes additions, modifications, deletions and renames since the merge-base with `gate.base`
+(default `origin/main`), plus staged, unstaged and untracked files. `--all` = whole tree.
+Deleted source files still trigger their language's project-wide checks, but are not passed to file linters.
+Changes to language configuration trigger all checks for that language. An explicitly configured
+base or `--base` that cannot be resolved is a configuration error (exit 2), not an empty diff.
+The CI template checks the whole tree on push; pull requests use the target branch's merge-base.
 
 ## Guards (all languages, fast)
 
@@ -14,8 +19,13 @@ Fails when a protected file or section differs from the base: `gates.toml`, `too
 `Cargo.toml` `[lints]` / `[workspace.lints]` / `[profile]`; `pyproject.toml` `[tool.ruff|mypy|pyright|importlinter|pytest|coverage|deptry|tach]`;
 `package.json` `eslintConfig`, `size-limit`, `knip`, `scripts.test|lint|typecheck`.
 Sections are compared as parsed data, so reformatting `pyproject.toml` or adding a dependency does not trip it.
+Deleting or renaming a protected file also fails the guard.
 Fix: revert. A human who agrees with the change runs `gate.py approve` (records hashes in `.gates/approved.json`,
 ignored when `CI` is set) or commits it to the base branch.
+An approval matches exact file/section identities and content; deleting a protected file is recorded
+explicitly. A later edit invalidates that approval. Config and approval files are UTF-8.
+When using `--base <ref>` for a run, use the same override for the human `approve` command.
+The snapshot and validation use that effective base, including committed deletions.
 
 ### guard.suppress
 Scans added lines for new suppressions:
@@ -24,6 +34,8 @@ Scans added lines for new suppressions:
 - JS/TS: `eslint-disable`, `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`, `.skip(`, `istanbul|c8|v8 ignore`, `as any`
 - Always fails: `.only(`, `fdescribe(`, `fit(`
 A line that also contains `gate-allow: <reason>` becomes a WARN listed for the reviewer instead of a FAIL.
+Rename detection is preserved: moving a source file does not make its unchanged suppressions new.
+Filenames are passed as literal Git pathspecs, including wildcard characters and `:(...)` prefixes.
 
 ## Rust
 
@@ -115,7 +127,7 @@ repo-wide.
 | Microbenchmarks | divan (CodSpeed mode) OR criterion | pytest-codspeed OR pytest-benchmark | tinybench | full, hot-path only |
 | Profiling (never a gate) | flamegraph, DHAT, samply | py-spy, scalene, memray | node --cpu-prof | on suspicion |
 
-Balance: `fast` (90% of units) = format+lint+types+tests+boundaries. `full` before done = + dead code, semver
+When gates are selected: `fast` per unit = format+lint+types+tests+boundaries. `full` before done = + dead code, semver
 (published), CRAP/mutate on the riskiest file (not the whole repo), benchmarks only when the unit touched a hot
 path. Wall-clock on a noisy machine is not a gate; deterministic counters are (CodSpeed simulation / gungraun /
 saved baseline + budget). Don't stack linters: ruff covers py format+lint+complexity; eslint covers ts.
@@ -124,3 +136,20 @@ saved baseline + budget). Don't stack linters: ruff covers py format+lint+comple
 
 `gate.py`: 0 no failures, 1 a check failed, 2 usage or config error. `bench_compare.py`: 0 within budget,
 1 regression or missing benchmark, 2 bad input.
+Benchmark metrics must be finite JSON numbers (not booleans, NaN or infinities);
+`--max-regression` must be a finite non-negative percentage. Invalid inputs exit 2 instead of reporting success.
+
+## Tool processes
+
+Checks run without a shell. On Windows, npm `.cmd` shims are resolved to their JavaScript entry point
+and run with Node so source filenames remain literal arguments. Extensionless Node-shebang entries,
+including TypeScript's `bin/tsc`, are supported. Other batch files are rejected; configure a native
+executable instead. Cargo plugins use their resolved executable, including `[tools]` pins.
+
+A timeout returns code 124 and preserves captured stdout/stderr. POSIX checks run in a new process group;
+Windows checks start suspended, join a kill-on-close Job Object, then resume. Cleanup terminates ordinary
+descendants even if their immediate parent already exited. This is process-lifetime management, not a
+security sandbox: external service-mediated launches can escape it.
+
+`init` preserves existing files unless `--force` is supplied. The vendored runner includes its templates,
+so re-running `init` works without the original skill directory.

@@ -25,7 +25,7 @@ for a in "$@"; do
 done
 if [ $((DO_RUST + DO_PY + DO_TS + DO_UB)) -eq 0 ]; then
   [ -f Cargo.toml ] && DO_RUST=1
-  { [ -f pyproject.toml ] || [ -f requirements.txt ]; } && DO_PY=1
+  { [ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f setup.cfg ] || [ -f setup.py ]; } && DO_PY=1
   [ -f package.json ] && DO_TS=1
   DO_UB=1
 fi

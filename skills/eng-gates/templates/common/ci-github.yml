@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0              # merge-base with origin/main needs history
+          fetch-depth: 0              # PR merge-base with the base branch needs history
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt, llvm-tools-preview
@@ -26,7 +26,12 @@ jobs:
       - run: uv sync --all-extras --dev
         if: hashFiles('uv.lock') != ''
       - run: bash tools/eng-gates/install-tools.sh
-      - run: python3 tools/eng-gates/gate.py full --base origin/${{ github.base_ref || 'main' }}
+      - run: python3 tools/eng-gates/gate.py full --all
+        if: github.event_name == 'push'
+      - run: python3 tools/eng-gates/gate.py full --base "origin/$GATES_BASE_REF"
+        if: github.event_name == 'pull_request'
+        env:
+          GATES_BASE_REF: ${{ github.base_ref }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
